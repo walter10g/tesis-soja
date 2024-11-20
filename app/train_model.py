@@ -30,10 +30,15 @@ test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=Fa
 
 # Modelo ResNet preentrenado
 model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-model.fc = nn.Linear(model.fc.in_features, 2)  # Dos clases: Good (0) y Bad (1)
+# Cambia el modelo para que tenga 4 salidas
+model.fc = nn.Linear(model.fc.in_features, 4)  # 4 clases: bad, slightly_bad, slightly_good, good
 
-# Definir pérdida y optimizador
+# Ajusta la pérdida para trabajar con 4 clases
 criterion = nn.CrossEntropyLoss()
+
+# Opcional: imprimir las clases detectadas por ImageFolder
+print(f"Clases detectadas: {dataset.classes}")  # ['bad', 'good', 'slightly_bad', 'slightly_good']
+
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 # Entrenamiento

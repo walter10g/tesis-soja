@@ -7,7 +7,8 @@ class SegmentationModel(nn.Module):
     def __init__(self, num_classes=4):
         super(SegmentationModel, self).__init__()
         # Usar FCN con ResNet-50 como backbone
-        self.model = models.segmentation.fcn_resnet50(pretrained=True)
+        weights = FCN_ResNet50_Weights.DEFAULT
+        self.model = models.segmentation.fcn_resnet50(weights=weights)
         # Ajustar la salida del modelo para el número de clases
         self.model.classifier[4] = nn.Conv2d(512, num_classes, kernel_size=1)
 
@@ -19,6 +20,9 @@ class SegmentationModel(nn.Module):
 
 
 def load_model(model_path, num_classes=4):
+    """
+    Carga un modelo de segmentación con los pesos entrenados.
+    """
     # Cargar modelo preentrenado con pesos predeterminados
     weights = FCN_ResNet50_Weights.DEFAULT
     model = models.segmentation.fcn_resnet50(weights=weights)
@@ -33,7 +37,7 @@ def load_model(model_path, num_classes=4):
     if any(k.startswith("model.") for k in state_dict.keys()):
         state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
     
-    # Cargar los pesos al modelo (puede no ser estrictamente compatible)
+    # Cargar los pesos al modelo
     model.load_state_dict(state_dict, strict=False)
     print("Pesos del modelo cargados correctamente.")
     return model

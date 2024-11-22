@@ -5,20 +5,25 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from model import SegmentationModel
 from torchvision.datasets import VisionDataset
+from sklearn.metrics import jaccard_score
+import numpy as np  # Importar numpy
 import os
 from PIL import Image
 
 # Configuración general
-num_epochs = 10
-batch_size = 4
+num_epochs = 30
+batch_size = 8
 learning_rate = 0.001
-num_classes=4
+num_classes = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_path = "modelo_soja_colores.pth"
 
-# Transformaciones
+# Transformaciones con data augmentation
 image_transform = transforms.Compose([
     transforms.Resize((224, 224)),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(15),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
@@ -63,6 +68,9 @@ masks_dir = "datasets/colors/masks"
 
 # Cargar el dataset
 dataset = SegmentationDataset(images_dir, masks_dir, image_transform, mask_transform)
+
+# Dividir en conjuntos de entrenamiento y prueba
+torch.manual_seed(42)  # Reproducibilidad
 train_size = int(0.8 * len(dataset))
 test_size = len(dataset) - train_size
 train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
@@ -71,12 +79,12 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
 # Inicializar modelo
-model = SegmentationModel(num_classes=4).to(device)
+model = SegmentationModel(num_classes=num_classes).to(device)
 
 # Cargar modelo existente
 if os.path.exists(model_path):
     try:
-        model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True), strict=False)
         print("Modelo previamente entrenado cargado.")
     except RuntimeError as e:
         print(f"Error al cargar pesos previos: {e}")
@@ -85,7 +93,8 @@ else:
     print("Entrenamiento desde cero.")
 
 # Configuración de entrenamiento
-criterion = nn.CrossEntropyLoss()
+weights = torch.tensor([1.0, 1.0, 1.0, 1.0]).to(device)  # Ajusta los pesos según distribución de clases si es necesario
+criterion = nn.CrossEntropyLoss(weight=weights)
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 # Entrenamiento
@@ -95,7 +104,7 @@ for epoch in range(num_epochs):
     running_loss = 0.0
     for images, masks in train_loader:
         images, masks = images.to(device), masks.to(device)
-        outputs = model(images)  # Salida del modelo ya ajustada
+        outputs = model(images)
         loss = criterion(outputs, masks)
 
         optimizer.zero_grad()
@@ -110,17 +119,40 @@ for epoch in range(num_epochs):
 torch.save(model.state_dict(), model_path)
 print(f"Modelo guardado en '{model_path}'")
 
-# Evaluación
+# Evaluación con métricas avanzadas
+def compute_iou(predictions, masks, num_classes):
+    iou_per_class = []
+    for cls in range(num_classes):
+        pred_cls = (predictions == cls).cpu().numpy().flatten()
+        mask_cls = (masks == cls).cpu().numpy().flatten()
+        iou = jaccard_score(mask_cls, pred_cls, average='binary', zero_division=0)
+        iou_per_class.append(iou)
+    return iou_per_class
+
 model.eval()
 correct = 0
 total = 0
+ious = []
 
 with torch.no_grad():
     for images, masks in test_loader:
         images, masks = images.to(device), masks.to(device)
         outputs = model(images)
         predictions = torch.argmax(outputs, dim=1)
+
         correct += (predictions == masks).sum().item()
         total += masks.numel()
 
+        # Calcular IoU por lote
+        batch_ious = compute_iou(predictions, masks, num_classes)
+        ious.append(batch_ious)
+
+# Calcular promedio de IoU por clase
+ious = np.array(ious)
+iou_per_class = ious.mean(axis=0)
+
+# Reporte de métricas
 print(f"Precisión en el conjunto de prueba: {100 * correct / total:.2f}%")
+for cls, iou in enumerate(iou_per_class):
+    print(f"IoU para la clase {cls}: {iou:.4f}")
+print(f"IoU promedio: {iou_per_class.mean():.4f}")

@@ -1,6 +1,7 @@
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 import os
 import random
+import numpy as np
 
 # Definir rangos de colores en RGB para cada categoría
 CATEGORY_COLOR_RANGES = {
@@ -27,7 +28,7 @@ os.makedirs(images_dir, exist_ok=True)
 os.makedirs(masks_dir, exist_ok=True)
 
 # Número de imágenes a generar por categoría
-images_per_category = 80
+images_per_category = 300  # Cambiado a 300
 image_size = (224, 224)  # Tamaño de las imágenes
 
 def generate_random_color(color_range):
@@ -44,12 +45,33 @@ def add_brightness_variation(img, factor_range=(0.8, 1.2)):
     factor = random.uniform(*factor_range)  # Factor de brillo entre 80% y 120%
     return enhancer.enhance(factor)
 
-def create_image_with_variation(color, factor_range=(0.8, 1.2)):
+def add_noise(img, noise_factor=0.05):
     """
-    Crea una imagen con color sólido y variación de brillo.
+    Agrega ruido aleatorio a una imagen.
+    """
+    arr = np.array(img)
+    noise = np.random.normal(0, noise_factor * 255, arr.shape).astype(np.int16)
+    noisy_arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
+    return Image.fromarray(noisy_arr)
+
+def add_blur(img, max_radius=2):
+    """
+    Aplica un desenfoque aleatorio a la imagen.
+    """
+    if random.random() < 0.5:  # 50% de probabilidad de aplicar blur
+        radius = random.uniform(0, max_radius)
+        return img.filter(ImageFilter.GaussianBlur(radius))
+    return img
+
+def create_image_with_variation(color):
+    """
+    Crea una imagen con color sólido y agrega variaciones realistas.
     """
     img = Image.new("RGB", image_size, color)  # Imagen base
-    return add_brightness_variation(img, factor_range)
+    img = add_brightness_variation(img)
+    img = add_noise(img)
+    img = add_blur(img)
+    return img
 
 def create_mask(value):
     """
@@ -64,7 +86,7 @@ for category, color_range in CATEGORY_COLOR_RANGES.items():
         color = generate_random_color(color_range)
         mask_value = CATEGORY_MASK_VALUES[category]
 
-        # Crear imagen con variación de brillo
+        # Crear imagen con variaciones
         img = create_image_with_variation(color)
         # Crear máscara correspondiente
         mask = create_mask(mask_value)
@@ -73,4 +95,4 @@ for category, color_range in CATEGORY_COLOR_RANGES.items():
         img.save(os.path.join(images_dir, f"{category}_{i+1}.jpg"))
         mask.save(os.path.join(masks_dir, f"{category}_{i+1}.png"))
 
-print(f"80 imágenes y máscaras generadas por categoría, guardadas en {output_dir}")
+print(f"{images_per_category} imágenes y máscaras generadas por categoría, guardadas en {output_dir}")

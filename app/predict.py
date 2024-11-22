@@ -47,7 +47,6 @@ def save_colored_mask(predictions, output_path, original_size):
     cv2.imwrite(output_path, mask_resized)
     print(f"Máscara segmentada guardada en {output_path}")
 
-
 def save_raw_predictions(predictions, output_path):
     """
     Guarda las predicciones crudas en escala de grises para depuración.
@@ -66,6 +65,22 @@ def save_raw_predictions(predictions, output_path):
     except Exception as e:
         print(f"Error guardando predicciones crudas: {e}")
 
+def analyze_predictions(output, pred_block):
+    """
+    Analiza las predicciones crudas y después de aplicar argmax.
+    """
+    print(f"Salida del modelo (antes de argmax): {output.shape}")
+    print(f"Valores máximos y mínimos en la salida: {output.max().item()}, {output.min().item()}")
+    print(f"Valores únicos en las predicciones después de argmax: {np.unique(pred_block)}")
+
+def debug_model_output(output):
+    """
+    Imprime estadísticas detalladas por clase en la salida cruda del modelo.
+    """
+    print("Debugging salida del modelo:")
+    for cls in range(output.shape[1]):
+        cls_output = output[0, cls].detach().cpu().numpy()
+        print(f"Clase {cls}: Max={cls_output.max()}, Min={cls_output.min()}, Mean={cls_output.mean()}")
 
 def segment_large_image(model, image_path, output_path, debug_path, block_size=224):
     """
@@ -86,13 +101,16 @@ def segment_large_image(model, image_path, output_path, debug_path, block_size=2
             block_tensor = transform(block).unsqueeze(0)
             with torch.no_grad():
                 output = model(block_tensor)['out']
+                debug_model_output(output)  # Depuración detallada
                 pred_block = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
+
+            # Analizar las predicciones del bloque
+            analyze_predictions(output, pred_block)
 
             # Agregar al canvas de predicciones
             predictions[y:y + pred_block.shape[0], x:x + pred_block.shape[1]] = pred_block
 
-   # Añadir el print aquí para depurar las predicciones
-    print(f"Valores únicos en predicciones: {np.unique(predictions)}")
+    print(f"Valores únicos en predicciones (completas): {np.unique(predictions)}")
 
     # Guardar predicciones crudas para depuración
     save_raw_predictions(predictions, debug_path)

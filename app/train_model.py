@@ -6,24 +6,33 @@ from torch.utils.data import DataLoader
 from model import SegmentationModel
 from torchvision.datasets import VisionDataset
 from sklearn.metrics import jaccard_score
-import numpy as np  # Importar numpy
+import numpy as np
 import os
 from PIL import Image
 
 # Configuración general
 num_epochs = 30
-batch_size = 8
-learning_rate = 0.001
+batch_size = 16
+learning_rate = 0.00001  # Learning rate reducido
+weight_decay = 1e-4      # Regularización
 num_classes = 4
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Uso de GPU si está disponible
 model_path = "modelo_soja_colores.pth"
+
+# Verificar si se está utilizando la GPU
+if device.type == "cuda":
+    print(f"Entrenamiento utilizando: {torch.cuda.get_device_name(0)}")
+else:
+    print("Entrenamiento utilizando CPU.")
 
 # Transformaciones con data augmentation
 image_transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
+    transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.3),
     transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
+    transforms.RandomVerticalFlip(),
+    transforms.RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
+    transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
@@ -84,7 +93,7 @@ model = SegmentationModel(num_classes=num_classes).to(device)
 # Cargar modelo existente
 if os.path.exists(model_path):
     try:
-        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True), strict=False)
+        model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
         print("Modelo previamente entrenado cargado.")
     except RuntimeError as e:
         print(f"Error al cargar pesos previos: {e}")
@@ -93,9 +102,9 @@ else:
     print("Entrenamiento desde cero.")
 
 # Configuración de entrenamiento
-weights = torch.tensor([1.0, 1.0, 1.0, 1.0]).to(device)  # Ajusta los pesos según distribución de clases si es necesario
+weights = torch.tensor([0.5, 1.0, 1.0, 1.0]).to(device)  # Ajustar pesos según distribución de clases
 criterion = nn.CrossEntropyLoss(weight=weights)
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
 # Entrenamiento
 print("Iniciando entrenamiento...")
@@ -115,20 +124,33 @@ for epoch in range(num_epochs):
 
     print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(train_loader):.4f}")
 
+    # Evaluación intermedia cada 5 épocas
+    if (epoch + 1) % 5 == 0:
+        with torch.no_grad():
+            model.eval()
+            print(f"Evaluación intermedia después de {epoch + 1} épocas:")
+            for i, (images, masks) in enumerate(test_loader):
+                images, masks = images.to(device), masks.to(device)
+                outputs = model(images)
+                predictions = torch.argmax(outputs, dim=1)
+                print(f"Valores únicos en predicciones: {torch.unique(predictions)}")
+                
+                # Guardar algunas predicciones como imágenes para visualización
+                if i < 5:  # Guardar solo las primeras 5
+                    for j in range(images.size(0)):
+                        pred_img = predictions[j].cpu().numpy()
+                        mask_img = masks[j].cpu().numpy()
+                        
+                        # Guardar predicciones y máscaras
+                        Image.fromarray((pred_img * 85).astype(np.uint8)).save(f"output_pred_epoch_{epoch+1}_{i}_{j}.png")
+                        Image.fromarray((mask_img * 85).astype(np.uint8)).save(f"output_mask_epoch_{epoch+1}_{i}_{j}.png")
+            model.train()
+
 # Guardar modelo entrenado
 torch.save(model.state_dict(), model_path)
 print(f"Modelo guardado en '{model_path}'")
 
-# Evaluación con métricas avanzadas
-def compute_iou(predictions, masks, num_classes):
-    iou_per_class = []
-    for cls in range(num_classes):
-        pred_cls = (predictions == cls).cpu().numpy().flatten()
-        mask_cls = (masks == cls).cpu().numpy().flatten()
-        iou = jaccard_score(mask_cls, pred_cls, average='binary', zero_division=0)
-        iou_per_class.append(iou)
-    return iou_per_class
-
+# Evaluación final
 model.eval()
 correct = 0
 total = 0
@@ -144,8 +166,12 @@ with torch.no_grad():
         total += masks.numel()
 
         # Calcular IoU por lote
-        batch_ious = compute_iou(predictions, masks, num_classes)
-        ious.append(batch_ious)
+        ious.append([
+            jaccard_score((predictions == cls).cpu().numpy().flatten(),
+                          (masks == cls).cpu().numpy().flatten(),
+                          average='binary', zero_division=0)
+            for cls in range(num_classes)
+        ])
 
 # Calcular promedio de IoU por clase
 ious = np.array(ious)

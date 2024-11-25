@@ -28,7 +28,7 @@ os.makedirs(images_dir, exist_ok=True)
 os.makedirs(masks_dir, exist_ok=True)
 
 # Número de imágenes a generar por categoría
-images_per_category = 300  # Cambiado a 300
+images_per_category = 500  # Cambiado a 500
 image_size = (224, 224)  # Tamaño de las imágenes
 
 def generate_random_color(color_range):
@@ -43,6 +43,14 @@ def add_brightness_variation(img, factor_range=(0.8, 1.2)):
     """
     enhancer = ImageEnhance.Brightness(img)
     factor = random.uniform(*factor_range)  # Factor de brillo entre 80% y 120%
+    return enhancer.enhance(factor)
+
+def add_contrast_variation(img, factor_range=(0.8, 1.2)):
+    """
+    Agrega una variación de contraste aleatoria a una imagen.
+    """
+    enhancer = ImageEnhance.Contrast(img)
+    factor = random.uniform(*factor_range)  # Factor de contraste entre 80% y 120%
     return enhancer.enhance(factor)
 
 def add_noise(img, noise_factor=0.05):
@@ -69,6 +77,7 @@ def create_image_with_variation(color):
     """
     img = Image.new("RGB", image_size, color)  # Imagen base
     img = add_brightness_variation(img)
+    img = add_contrast_variation(img)
     img = add_noise(img)
     img = add_blur(img)
     return img

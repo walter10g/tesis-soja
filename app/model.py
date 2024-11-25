@@ -1,77 +1,63 @@
 import torch
 import torch.nn as nn
-from torchvision import models
+import torch.nn.functional as F
 
-
-class ResNet18SegmentationModel(nn.Module):
-    def __init__(self, num_classes=4, freeze_backbone=True):
+class SimpleCNN(nn.Module):
+    def __init__(self, num_classes=4):
         """
-        Modelo de segmentación basado en ResNet-18 para clasificar imágenes en múltiples categorías.
-
+        Modelo de red neuronal convolucional simple para clasificación de imágenes.
+        
         Args:
-            num_classes (int): Número de categorías de salida. (Default: 4)
-            freeze_backbone (bool): Si True, congela las capas del backbone preentrenado. (Default: True)
+            num_classes (int): Número de categorías de salida.
         """
-        super(ResNet18SegmentationModel, self).__init__()
-        # Cargar ResNet-18 preentrenado
-        resnet18 = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        super(SimpleCNN, self).__init__()
         
-        # Extraer el backbone sin la capa de clasificación
-        self.backbone = nn.Sequential(*list(resnet18.children())[:-1])  # Hasta la capa de pooling global
+        # Capas convolucionales
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
         
-        # Congelar el backbone si se especifica
-        if freeze_backbone:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
+        # Batch normalization para estabilizar el entrenamiento
+        self.bn1 = nn.BatchNorm2d(32)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.bn3 = nn.BatchNorm2d(128)
+        
+        # Pooling
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        # Capa fully connected
+        self.fc1 = nn.Linear(128 * 28 * 28, 256)  # Asegúrate de que las dimensiones coincidan con el tamaño de entrada
+        self.fc2 = nn.Linear(256, num_classes)
 
-        # Crear un clasificador personalizado
-        in_features = resnet18.fc.in_features
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(in_features, 256),  # Reducir dimensionalidad
-            nn.ReLU(),
-            nn.Dropout(0.5),             # Regularización
-            nn.Linear(256, num_classes)  # Salida final para las clases (4 categorías)
-        )
+        # Dropout para evitar sobreajuste
+        self.dropout = nn.Dropout(0.5)
 
     def forward(self, x):
-        """
-        Realiza el paso forward del modelo.
+        # Paso forward a través de las capas convolucionales
+        x = self.pool(F.relu(self.bn1(self.conv1(x))))
+        x = self.pool(F.relu(self.bn2(self.conv2(x))))
+        x = self.pool(F.relu(self.bn3(self.conv3(x))))
         
-        Args:
-            x (torch.Tensor): Tensor de entrada con tamaño [batch_size, channels, height, width].
-        
-        Returns:
-            torch.Tensor: Tensor de salida con las probabilidades de cada clase.
-        """
-        # Pasar los datos a través del backbone y luego al clasificador
-        x = self.backbone(x)
-        x = self.classifier(x)
+        # Flatten para pasar a la capa fully connected
+        x = x.view(x.size(0), -1)
+        x = self.dropout(F.relu(self.fc1(x)))
+        x = self.fc2(x)
         return x
 
-
-def load_model(model_path, num_classes=4, freeze_backbone=True):
+def load_model(model_path, num_classes=4):
     """
-    Carga un modelo ajustado para clasificación multicategoría con ResNet-18.
-
+    Carga un modelo SimpleCNN preentrenado si se proporciona un archivo de pesos.
+    
     Args:
         model_path (str): Ruta al archivo de los pesos del modelo.
-        num_classes (int): Número de categorías de salida. (Default: 4)
-        freeze_backbone (bool): Si True, congela las capas del backbone preentrenado. (Default: True)
+        num_classes (int): Número de categorías de salida.
     
     Returns:
-        ResNet18SegmentationModel: Modelo cargado con los pesos entrenados.
+        SimpleCNN: Modelo cargado.
     """
-    # Inicializar modelo
-    model = ResNet18SegmentationModel(num_classes=num_classes, freeze_backbone=freeze_backbone)
-    
-    # Cargar pesos desde el archivo
-    state_dict = torch.load(model_path, map_location=torch.device("cpu"))
-
-    # Ajustar claves si el checkpoint incluye prefijos adicionales
-    if any(k.startswith("model.") for k in state_dict.keys()):
-        state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
-
-    model.load_state_dict(state_dict, strict=False)
-    print("Pesos del modelo cargados correctamente.")
+    model = SimpleCNN(num_classes=num_classes)
+    if model_path and os.path.exists(model_path):
+        state_dict = torch.load(model_path, map_location=torch.device("cpu"))
+        model.load_state_dict(state_dict)
+        print("Pesos del modelo cargados correctamente desde:", model_path)
     return model

@@ -1,156 +1,121 @@
+import os
 import torch
 from torchvision import transforms
-from PIL import Image
-import numpy as np
-import cv2
-import os
-from model import load_model
+from PIL import Image, ImageDraw
+from model import initialize_model
 
-# Colores para cada clase
-CLASS_COLORS = {
-    0: [153, 51, 51],      # Marrón rojizo (suelo muerto)
-    1: [255, 204, 102],    # Amarillo (ligeramente malo)
-    2: [102, 204, 102],    # Verde claro (moderadamente bueno)
-    3: [0, 102, 51],       # Verde oscuro (muy bueno)
+# Configuración
+MODEL_PATH = "model.pth"  # Ruta al modelo guardado
+TEST_IMAGES_DIR = "test_images"  # Carpeta de imágenes a analizar
+SEGMENTED_IMAGES_DIR = "test_images_segmented"  # Carpeta para guardar imágenes segmentadas
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+BLOCK_SIZE = 16  # Tamaño del bloque (32x32)
+
+# Colores para sombrear las categorías
+CATEGORY_COLORS = {
+    0: (0, 255, 0, 100),    # Verde translúcido (good)
+    1: (128, 0, 128, 100),  # Lila translúcido (slightly_good)
+    2: (255, 255, 0, 100),  # Amarillo translúcido (slightly_bad)
+    3: (255, 0, 0, 100),    # Rojo translúcido (bad)
+    "unknown": (128, 128, 128, 100)  # Gris translúcido (desconocido)
 }
 
-# Transformaciones para imágenes
+# Transformaciones para preprocesar las imágenes
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Igual que en el entrenamiento
 ])
 
-def preprocess_image(image_path):
-    """
-    Carga y preprocesa una imagen.
-    """
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"La imagen {image_path} no existe.")
+# Cargar modelo completo
+def load_model(model_path, device):
+    # Cargar modelo completo
+    model = torch.load(model_path, map_location=device)
+    model.eval()  # Poner el modelo en modo evaluación
+    return model
 
+# Procesar una imagen
+def process_image(image_path, model, device):
+    # Cargar imagen
     image = Image.open(image_path).convert("RGB")
-    original_size = image.size
-    image_tensor = transform(image).unsqueeze(0)
+    width, height = image.size
 
-    print(f"Tamaño del tensor preprocesado para {image_path}: {image_tensor.shape}")
-    print(f"Valores máximos y mínimos del tensor: {image_tensor.max()}, {image_tensor.min()}")
-    return image_tensor, original_size
+    # Crear una nueva imagen para la segmentación
+    segmented_image = image.copy()
+    overlay = Image.new("RGBA", (width, height))
+    draw = ImageDraw.Draw(overlay)
 
-def save_colored_mask(predictions, output_path, original_size):
-    """
-    Crea y guarda una máscara segmentada coloreada.
-    """
-    mask = np.zeros((predictions.shape[0], predictions.shape[1], 3), dtype=np.uint8)
-    for class_id, color in CLASS_COLORS.items():
-        mask[predictions == class_id] = color
+    # Contadores para estadísticas
+    category_counts = {key: 0 for key in CATEGORY_COLORS.keys()}
 
-    mask_resized = cv2.resize(mask, original_size, interpolation=cv2.INTER_NEAREST)
-    cv2.imwrite(output_path, mask_resized)
-    print(f"Máscara segmentada guardada en {output_path}")
+    # Dividir en bloques 32x32 y clasificar
+    for y in range(0, height, BLOCK_SIZE):
+        for x in range(0, width, BLOCK_SIZE):
+            # Recortar bloque
+            block = image.crop((x, y, x + BLOCK_SIZE, y + BLOCK_SIZE))
+            
+            # Redimensionar si el bloque es menor a BLOCK_SIZE (en los bordes)
+            block = block.resize((BLOCK_SIZE, BLOCK_SIZE), Image.Resampling.BICUBIC)
 
-def save_raw_predictions(predictions, output_path):
-    """
-    Guarda las predicciones crudas en escala de grises para depuración.
-    """
-    try:
-        if np.max(predictions) == 0:
-            raise ValueError("Predicciones contienen solo ceros. Verifica el modelo y los datos.")
-        
-        # Normalizar las predicciones a 0-255
-        normalized_pred = (predictions / np.max(predictions)) * 255.0
-        normalized_pred = normalized_pred.astype(np.uint8)
+            # Preprocesar bloque
+            block_tensor = transform(block).unsqueeze(0).to(device)
 
-        # Guardar como imagen
-        cv2.imwrite(output_path, normalized_pred)
-        print(f"Predicciones crudas guardadas en {output_path}")
-    except Exception as e:
-        print(f"Error guardando predicciones crudas: {e}")
-
-def analyze_predictions(output, pred_block):
-    """
-    Analiza las predicciones crudas y después de aplicar argmax.
-    """
-    print(f"Salida del modelo (antes de argmax): {output.shape}")
-    print(f"Valores máximos y mínimos en la salida: {output.max().item()}, {output.min().item()}")
-    print(f"Valores únicos en las predicciones después de argmax: {np.unique(pred_block)}")
-
-def debug_model_output(output):
-    """
-    Imprime estadísticas detalladas por clase en la salida cruda del modelo.
-    """
-    print("Debugging salida del modelo:")
-    for cls in range(output.shape[1]):
-        cls_output = output[0, cls].detach().cpu().numpy()
-        print(f"Clase {cls}: Max={cls_output.max()}, Min={cls_output.min()}, Mean={cls_output.mean()}")
-
-def segment_large_image(model, image_path, output_path, debug_path, block_size=224):
-    """
-    Divide imágenes grandes en bloques, segmenta cada bloque y los combina.
-    """
-    image = Image.open(image_path).convert("RGB")
-    original_size = image.size
-    width, height = original_size
-
-    predictions = np.zeros((height, width), dtype=np.uint8)
-
-    for y in range(0, height, block_size):
-        for x in range(0, width, block_size):
-            # Recortar el bloque
-            block = image.crop((x, y, min(x + block_size, width), min(y + block_size, height)))
-
-            # Preprocesar y predecir
-            block_tensor = transform(block).unsqueeze(0)
+            # Predecir categoría
             with torch.no_grad():
-                output = model(block_tensor)['out']
-                debug_model_output(output)  # Depuración detallada
-                pred_block = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
+                outputs = model(block_tensor)
+                _, predicted = torch.max(outputs, 1)
+                category = predicted.item()
 
-            # Analizar las predicciones del bloque
-            analyze_predictions(output, pred_block)
+            # Determinar color del bloque
+            if category in CATEGORY_COLORS:
+                color = CATEGORY_COLORS[category]
+                category_counts[category] += 1
+            else:
+                color = CATEGORY_COLORS["unknown"]
+                category_counts["unknown"] += 1
 
-            # Agregar al canvas de predicciones
-            predictions[y:y + pred_block.shape[0], x:x + pred_block.shape[1]] = pred_block
+            # Dibujar el bloque con sombreado translúcido
+            draw.rectangle([x, y, x + BLOCK_SIZE, y + BLOCK_SIZE], fill=color)
 
-    print(f"Valores únicos en predicciones (completas): {np.unique(predictions)}")
+    # Combinar imagen original con la capa de sombreado
+    segmented_image = Image.alpha_composite(segmented_image.convert("RGBA"), overlay)
 
-    # Guardar predicciones crudas para depuración
-    save_raw_predictions(predictions, debug_path)
+    # Convertir a RGB para guardar en formatos como JPEG
+    segmented_image = segmented_image.convert("RGB")
 
-    # Crear y guardar la máscara segmentada
-    save_colored_mask(predictions, output_path, original_size)
+    # Estadísticas de porcentaje
+    total_blocks = sum(category_counts.values())
+    print(f"Resultados para {os.path.basename(image_path)}:")
+    for category, count in category_counts.items():
+        percentage = (count / total_blocks) * 100 if total_blocks > 0 else 0
+        label = "Desconocido" if category == "unknown" else f"Categoría {category}"
+        print(f"  {label}: {percentage:.2f}%")
 
-def process_folder(folder_path, output_folder, debug_folder, model):
-    """
-    Procesa todas las imágenes de una carpeta.
-    """
-    if not os.path.exists(folder_path):
-        raise FileNotFoundError(f"La carpeta {folder_path} no existe.")
-    os.makedirs(output_folder, exist_ok=True)
-    os.makedirs(debug_folder, exist_ok=True)
+    return segmented_image
 
-    for file_name in os.listdir(folder_path):
-        if not file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-            print(f"Archivo {file_name} ignorado (no es una imagen).")
-            continue
+# Procesar todas las imágenes de la carpeta
+def process_images(input_dir, output_dir, model, device):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-        image_path = os.path.join(folder_path, file_name)
-        output_path = os.path.join(output_folder, f"segmented_{file_name}")
-        debug_path = os.path.join(debug_folder, f"raw_predictions_{file_name}")
-        print(f"Procesando {file_name}...")
+    for image_name in os.listdir(input_dir):
+        image_path = os.path.join(input_dir, image_name)
+        if os.path.isfile(image_path) and image_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+            print(f"Procesando {image_name}...")
+            segmented_image = process_image(image_path, model, device)
+            
+            # Convertir a RGB antes de guardar
+            segmented_image.save(os.path.join(output_dir, image_name))
+            
+            print(f"Imagen segmentada guardada: {image_name}")
 
-        try:
-            segment_large_image(model, image_path, output_path, debug_path)
-        except Exception as e:
-            print(f"Error procesando {file_name}: {e}")
-
+# Main
 if __name__ == "__main__":
-    # Cargar el modelo entrenado
-    model = load_model("modelo_soja_colores.pth")
-    model.eval()
+    # Cargar modelo
+    print("Cargando modelo...")
+    model = load_model(MODEL_PATH, DEVICE)
+    print("Modelo cargado.")
 
-    # Directorios
-    input_folder = "test_images"
-    output_folder = "test_images_segmented"
-    debug_folder = "debug_predictions"
-
-    # Procesar todas las imágenes en la carpeta
-    process_folder(input_folder, output_folder, debug_folder, model)
+    # Procesar imágenes
+    print("Procesando imágenes...")
+    process_images(TEST_IMAGES_DIR, SEGMENTED_IMAGES_DIR, model, DEVICE)
+    print("Todas las imágenes han sido procesadas.")

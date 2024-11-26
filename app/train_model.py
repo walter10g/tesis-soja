@@ -2,45 +2,36 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import transforms, datasets
-from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
+from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
-from model import SimpleCNN  # Importamos el modelo SimpleCNN
-import numpy as np
+from model import SimpleCNN
 import os
-from collections import Counter
-import multiprocessing
+import random
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Configuración general
-num_epochs = 50
+num_epochs = 20  # Ajustado para memorizar rápidamente
 batch_size = 16
-learning_rate = 0.0001
-weight_decay = 5e-4
+learning_rate = 0.001  # Learning rate optimizado
+weight_decay = 1e-4  # Regularización L2
 early_stopping_patience = 5
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model_path = "simple_cnn_soja_model.pth"
+model_path = "simple_cnn_good_model.pth"
 
-# Forzar método de inicio seguro para Windows
-multiprocessing.set_start_method("spawn", force=True)
+# Directorio único para la categoría "good"
+images_dir = "datasets/colors/images/"
 
-# Transformaciones con data augmentation
+# Transformaciones: Redimensionar a 8x8 y convertir a tensor
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(degrees=15),
-    transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
-    transforms.RandomPerspective(distortion_scale=0.1, p=0.5),
-    transforms.RandomResizedCrop((224, 224), scale=(0.8, 1.0)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transforms.Resize((8, 8)),  # Redimensionar a 8x8
+    transforms.ToTensor()
 ])
-
-# Directorios base
-images_dir = "datasets/colors/images"
 
 # Función principal
 def main():
-    # Dataset y DataLoader
-    dataset = datasets.ImageFolder(images_dir, transform=transform)
+    # Dataset para una sola categoría
+    dataset = datasets.ImageFolder(root=images_dir, transform=transform)
 
     # Dividir el dataset en entrenamiento y prueba
     dataset_size = len(dataset)
@@ -49,37 +40,27 @@ def main():
     train_indices = list(range(train_size))
     test_indices = list(range(train_size, dataset_size))
 
-    train_dataset = Subset(dataset, train_indices)
-    test_dataset = Subset(dataset, test_indices)
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    test_dataset = torch.utils.data.Subset(dataset, test_indices)
 
-    # Calcular pesos para el sampler
-    class_counts = Counter(dataset.targets)
-    class_weights = [1.0 / class_counts[label] for label in dataset.targets]
-
-    # Ajustar los pesos para el subconjunto de entrenamiento
-    train_targets = [dataset.targets[i] for i in train_indices]
-    train_class_counts = Counter(train_targets)
-    train_weights = [1.0 / train_class_counts[label] for label in train_targets]
-    train_sampler = WeightedRandomSampler(train_weights, len(train_weights))
-
-    # DataLoaders con `num_workers=4` para mejor rendimiento
+    # DataLoaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        sampler=train_sampler,
-        num_workers=4,
+        shuffle=True,
+        num_workers=2,
         pin_memory=True
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True
     )
 
     # Cargar modelo
-    model = SimpleCNN(num_classes=4).to(device)
+    model = SimpleCNN().to(device)
 
     if os.path.exists(model_path):
         print(f"Cargando modelo preexistente desde {model_path}")
@@ -88,7 +69,7 @@ def main():
         print("Entrenamiento desde cero.")
 
     # Función de entrenamiento
-    def train_and_evaluate(model, train_loader, test_loader, optimizer, criterion, scheduler, num_epochs, best_model_path):
+    def train_and_evaluate(model, train_loader, test_loader, optimizer, criterion, num_epochs, best_model_path):
         best_val_loss = float('inf')
         epochs_no_improve = 0
 
@@ -96,13 +77,13 @@ def main():
             # Entrenamiento
             model.train()
             running_loss = 0.0
-            for images, labels in train_loader:
-                images, labels = images.to(device), labels.to(device)
-
-                outputs = model(images)
-                loss = criterion(outputs, labels)
+            for images, _ in train_loader:
+                images = images.to(device)
+                labels = torch.zeros(images.size(0), 1).to(device)  # Todas las etiquetas son 0
 
                 optimizer.zero_grad()
+                outputs = model(images)
+                loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
 
@@ -113,38 +94,25 @@ def main():
             # Validación
             model.eval()
             val_loss = 0.0
-            correct = 0
-            total = 0
-            all_labels = []
-            all_predictions = []
             with torch.no_grad():
-                for images, labels in test_loader:
-                    images, labels = images.to(device), labels.to(device)
+                for images, _ in test_loader:
+                    images = images.to(device)
+                    labels = torch.zeros(images.size(0), 1).to(device)
                     outputs = model(images)
                     loss = criterion(outputs, labels)
                     val_loss += loss.item()
 
-                    _, predicted = torch.max(outputs, 1)
-                    total += labels.size(0)
-                    correct += (predicted == labels).sum().item()
-                    all_labels.extend(labels.cpu().numpy())
-                    all_predictions.extend(predicted.cpu().numpy())
-
             val_loss /= len(test_loader)
-            accuracy = 100 * correct / total
-            f1 = f1_score(all_labels, all_predictions, average="weighted")
-            print(f"Validation Loss: {val_loss:.4f}, Accuracy: {accuracy:.2f}%, F1-Score: {f1:.4f}")
+            print(f"Validation Loss: {val_loss:.4f}")
 
             # Guardar el mejor modelo
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save(model.state_dict(), best_model_path)
-                print(f"Mejor modelo guardado en la época {epoch + 1} con precisión de {accuracy:.2f}%")
+                print(f"Mejor modelo guardado en la época {epoch + 1}")
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-
-            scheduler.step()
 
             if epochs_no_improve >= early_stopping_patience:
                 print("Early stopping activado.")
@@ -152,13 +120,12 @@ def main():
 
         return model
 
-    # Configurar criterio, optimizador y scheduler
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # Configurar criterio y optimizador
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.001, steps_per_epoch=len(train_loader), epochs=num_epochs)
 
     print("Fase 1: Entrenamiento inicial")
-    model = train_and_evaluate(model, train_loader, test_loader, optimizer, criterion, scheduler, num_epochs, model_path)
+    model = train_and_evaluate(model, train_loader, test_loader, optimizer, criterion, num_epochs, model_path)
 
     print(f"Modelo final guardado en {model_path}")
 

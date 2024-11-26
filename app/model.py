@@ -4,12 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class SimpleCNN(nn.Module):
-    def __init__(self, num_classes=4):
+    def __init__(self):
         """
-        Modelo de red neuronal convolucional simple para clasificación de imágenes.
-        
-        Args:
-            num_classes (int): Número de categorías de salida.
+        Modelo de red neuronal convolucional simple para clasificación binaria.
         """
         super(SimpleCNN, self).__init__()
         
@@ -26,9 +23,9 @@ class SimpleCNN(nn.Module):
         # Pooling
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Capa fully connected
-        self.fc1 = nn.Linear(128 * 28 * 28, 256)  # Asegúrate de que las dimensiones coincidan con el tamaño de entrada
-        self.fc2 = nn.Linear(256, num_classes)
+        # Capas totalmente conectadas
+        self.fc1 = nn.Linear(128 * 1 * 1, 256)  # Compatible con imágenes de 8x8
+        self.fc2 = nn.Linear(256, 1)  # Salida binaria
 
         # Dropout para evitar sobreajuste
         self.dropout = nn.Dropout(0.5)
@@ -39,24 +36,19 @@ class SimpleCNN(nn.Module):
         x = self.pool(F.relu(self.bn2(self.conv2(x))))
         x = self.pool(F.relu(self.bn3(self.conv3(x))))
         
-        # Flatten para pasar a la capa fully connected
-        x = x.view(x.size(0), -1)
+        # Flatten para pasar a las capas fully connected
+        x = torch.flatten(x, 1)
+
+        # Paso por las capas fully connected
         x = self.dropout(F.relu(self.fc1(x)))
         x = self.fc2(x)
         return x
 
-def load_model(model_path, num_classes=4):
+def load_model(model_path):
     """
     Carga un modelo SimpleCNN preentrenado si se proporciona un archivo de pesos.
-    
-    Args:
-        model_path (str): Ruta al archivo de los pesos del modelo.
-        num_classes (int): Número de categorías de salida.
-    
-    Returns:
-        SimpleCNN: Modelo cargado.
     """
-    model = SimpleCNN(num_classes=num_classes)
+    model = SimpleCNN()
     if model_path and os.path.exists(model_path):
         state_dict = torch.load(model_path, map_location=torch.device("cpu"))
         model.load_state_dict(state_dict)

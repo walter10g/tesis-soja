@@ -1,121 +1,135 @@
 import os
+from PIL import Image
 import torch
 from torchvision import transforms
-from PIL import Image, ImageDraw
-from model import initialize_model
+import numpy as np
 
-# Configuración
-MODEL_PATH = "model.pth"  # Ruta al modelo guardado
-TEST_IMAGES_DIR = "test_images"  # Carpeta de imágenes a analizar
-SEGMENTED_IMAGES_DIR = "test_images_segmented"  # Carpeta para guardar imágenes segmentadas
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-BLOCK_SIZE = 16  # Tamaño del bloque (32x32)
-
-# Colores para sombrear las categorías
+# Colores para cada categoría (categorías numeradas como Cat 1, Cat 2, etc.)
 CATEGORY_COLORS = {
-    0: (0, 255, 0, 100),    # Verde translúcido (good)
-    1: (128, 0, 128, 100),  # Lila translúcido (slightly_good)
-    2: (255, 255, 0, 100),  # Amarillo translúcido (slightly_bad)
-    3: (255, 0, 0, 100),    # Rojo translúcido (bad)
-    "unknown": (128, 128, 128, 100)  # Gris translúcido (desconocido)
+    0: (128, 128, 128),  # Unknown/Background (gris)
+    1: (255, 0, 0),      # bad (rojo)
+    2: (0, 255, 0),      # good (verde)
+    3: (255, 255, 0),    # slightly_bad (amarillo)
+    4: (0, 0, 255),      # slightly_good (azul)
 }
 
-# Transformaciones para preprocesar las imágenes
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Igual que en el entrenamiento
-])
+def analyze_image(image_path, model, output_dir, patch_size=(16, 16), device="cpu"):
+    """
+    Analiza una imagen dividiéndola en parches de 16x16, segmenta cada parche y genera una imagen sombreada.
 
-# Cargar modelo completo
-def load_model(model_path, device):
-    # Cargar modelo completo
-    model = torch.load(model_path, map_location=device)
-    model.eval()  # Poner el modelo en modo evaluación
-    return model
+    Args:
+        image_path (str): Ruta de la imagen de entrada.
+        model (torch.nn.Module): Modelo de segmentación entrenado.
+        output_dir (str): Carpeta para guardar las imágenes segmentadas.
+        patch_size (tuple): Tamaño de los parches (ancho, alto).
+        device (str): Dispositivo ("cpu" o "cuda").
+    """
+    # Crear el directorio de salida si no existe
+    os.makedirs(output_dir, exist_ok=True)
 
-# Procesar una imagen
-def process_image(image_path, model, device):
-    # Cargar imagen
+    # Cargar la imagen original
     image = Image.open(image_path).convert("RGB")
-    width, height = image.size
+    original_size = image.size  # Guardar tamaño original (ancho, alto)
 
-    # Crear una nueva imagen para la segmentación
-    segmented_image = image.copy()
-    overlay = Image.new("RGBA", (width, height))
-    draw = ImageDraw.Draw(overlay)
+    # Preparar transformaciones para redimensionar los parches
+    preprocess = transforms.Compose([
+        transforms.Resize((224, 224)),  # Redimensionar cada parche
+        transforms.ToTensor(),         # Convertir a tensor
+    ])
 
-    # Contadores para estadísticas
-    category_counts = {key: 0 for key in CATEGORY_COLORS.keys()}
+    # Convertir la imagen en un array NumPy para manipular parches
+    image_array = np.array(image)
 
-    # Dividir en bloques 32x32 y clasificar
-    for y in range(0, height, BLOCK_SIZE):
-        for x in range(0, width, BLOCK_SIZE):
-            # Recortar bloque
-            block = image.crop((x, y, x + BLOCK_SIZE, y + BLOCK_SIZE))
-            
-            # Redimensionar si el bloque es menor a BLOCK_SIZE (en los bordes)
-            block = block.resize((BLOCK_SIZE, BLOCK_SIZE), Image.Resampling.BICUBIC)
+    # Calcular cuántos parches caben en la imagen
+    width, height = original_size
+    patch_width, patch_height = patch_size
+    num_patches_x = width // patch_width
+    num_patches_y = height // patch_height
 
-            # Preprocesar bloque
-            block_tensor = transform(block).unsqueeze(0).to(device)
+    # Crear una máscara de colores con el mismo tamaño que la imagen original
+    color_mask = np.zeros_like(image_array, dtype=np.uint8)
 
-            # Predecir categoría
+    # Contador de píxeles para cada categoría
+    pixel_counts = {category: 0 for category in CATEGORY_COLORS.keys()}
+
+    # Recorrer cada parche de la imagen
+    for y in range(num_patches_y):
+        for x in range(num_patches_x):
+            # Coordenadas del parche actual
+            x_start = x * patch_width
+            x_end = x_start + patch_width
+            y_start = y * patch_height
+            y_end = y_start + patch_height
+
+            # Extraer el parche de la imagen
+            patch = image_array[y_start:y_end, x_start:x_end]
+            patch_image = Image.fromarray(patch)
+
+            # Transformar el parche para el modelo
+            input_tensor = preprocess(patch_image).unsqueeze(0).to(device)
+
+            # Realizar la predicción con el modelo
             with torch.no_grad():
-                outputs = model(block_tensor)
-                _, predicted = torch.max(outputs, 1)
-                category = predicted.item()
+                output = model(input_tensor)["out"]
+                predicted_mask = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
 
-            # Determinar color del bloque
-            if category in CATEGORY_COLORS:
-                color = CATEGORY_COLORS[category]
-                category_counts[category] += 1
-            else:
-                color = CATEGORY_COLORS["unknown"]
-                category_counts["unknown"] += 1
+            # Redimensionar la máscara predicha al tamaño original del parche
+            predicted_mask_resized = np.array(
+                Image.fromarray(predicted_mask.astype(np.uint8)).resize((patch_width, patch_height), resample=Image.NEAREST)
+            )
 
-            # Dibujar el bloque con sombreado translúcido
-            draw.rectangle([x, y, x + BLOCK_SIZE, y + BLOCK_SIZE], fill=color)
+            # Actualizar el conteo de píxeles para cada categoría
+            unique, counts = np.unique(predicted_mask_resized, return_counts=True)
+            for category, count in zip(unique, counts):
+                pixel_counts[category] += count
 
-    # Combinar imagen original con la capa de sombreado
-    segmented_image = Image.alpha_composite(segmented_image.convert("RGBA"), overlay)
+            # Crear la máscara de colores para el parche
+            patch_color_mask = np.zeros((patch_height, patch_width, 3), dtype=np.uint8)
+            for category, color in CATEGORY_COLORS.items():
+                patch_color_mask[predicted_mask_resized == category] = color
 
-    # Convertir a RGB para guardar en formatos como JPEG
-    segmented_image = segmented_image.convert("RGB")
+            # Insertar el parche coloreado en la máscara completa
+            color_mask[y_start:y_end, x_start:x_end] = patch_color_mask
 
-    # Estadísticas de porcentaje
-    total_blocks = sum(category_counts.values())
+    # Crear una nueva imagen a partir de la máscara de colores
+    color_mask_image = Image.fromarray(color_mask)
+
+    # Superponer la máscara sobre la imagen original
+    segmented_image = Image.blend(image, color_mask_image, alpha=0.5)
+
+    # Guardar la imagen segmentada
+    output_path = os.path.join(output_dir, os.path.basename(image_path))
+    segmented_image.save(output_path)
+    print(f"Imagen segmentada guardada en {output_path}")
+
+    # Calcular el porcentaje de píxeles por categoría
+    total_pixels = sum(pixel_counts.values())
+    category_percentages = {
+        f"Cat {category}": (count / total_pixels) * 100 for category, count in pixel_counts.items()
+    }
+
+    # Imprimir los porcentajes finales por categoría
     print(f"Resultados para {os.path.basename(image_path)}:")
-    for category, count in category_counts.items():
-        percentage = (count / total_blocks) * 100 if total_blocks > 0 else 0
-        label = "Desconocido" if category == "unknown" else f"Categoría {category}"
-        print(f"  {label}: {percentage:.2f}%")
+    for category, percentage in category_percentages.items():
+        print(f"{category}: {percentage:.2f}%")
 
-    return segmented_image
+def main():
+    # Configuración
+    model_path = "deeplab_complete_model.pth"
+    input_dir = "test_images"
+    output_dir = "test_images_segmented"
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# Procesar todas las imágenes de la carpeta
-def process_images(input_dir, output_dir, model, device):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    # Cargar el modelo entrenado
+    model = torch.load(model_path, map_location=device)
+    model.eval()
 
-    for image_name in os.listdir(input_dir):
-        image_path = os.path.join(input_dir, image_name)
-        if os.path.isfile(image_path) and image_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-            print(f"Procesando {image_name}...")
-            segmented_image = process_image(image_path, model, device)
-            
-            # Convertir a RGB antes de guardar
-            segmented_image.save(os.path.join(output_dir, image_name))
-            
-            print(f"Imagen segmentada guardada: {image_name}")
+    # Procesar cada imagen en el directorio de entrada
+    for image_filename in os.listdir(input_dir):
+        if image_filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+            image_path = os.path.join(input_dir, image_filename)
+            print(f"Procesando imagen: {image_filename}")
+            analyze_image(image_path, model, output_dir, patch_size=(16, 16), device=device)
 
-# Main
 if __name__ == "__main__":
-    # Cargar modelo
-    print("Cargando modelo...")
-    model = load_model(MODEL_PATH, DEVICE)
-    print("Modelo cargado.")
-
-    # Procesar imágenes
-    print("Procesando imágenes...")
-    process_images(TEST_IMAGES_DIR, SEGMENTED_IMAGES_DIR, model, DEVICE)
-    print("Todas las imágenes han sido procesadas.")
+    main()

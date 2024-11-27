@@ -1,26 +1,35 @@
 import torch
 import torch.nn as nn
-from torchvision import models
+from torchvision.models.segmentation import deeplabv3_resnet50
 
-class CropClassifier(nn.Module):
-    def __init__(self, num_classes=4):
-        super(CropClassifier, self).__init__()
-        # Cargamos ResNet-18 preentrenado
-        self.resnet = models.resnet18(pretrained=True)
-        
-        # Reemplazamos la capa completamente conectada final para que coincida con nuestras clases
-        num_features = self.resnet.fc.in_features
-        self.resnet.fc = nn.Linear(num_features, num_classes)
-        
-        # Activación final (Softmax o CrossEntropy se maneja en la pérdida)
-        self.softmax = nn.Softmax(dim=1)
-    
-    def forward(self, x):
-        x = self.resnet(x)
-        return self.softmax(x)
+def create_deeplab_model(num_classes):
+    """
+    Crea un modelo DeepLabV3 basado en ResNet-50 con PyTorch.
+    """
+    # Cargar el modelo preentrenado
+    model = deeplabv3_resnet50(pretrained=True)
 
-# Función para inicializar el modelo
-def initialize_model(num_classes=4, device='cuda' if torch.cuda.is_available() else 'cpu'):
-    model = CropClassifier(num_classes=num_classes)
-    model = model.to(device)
+    # Modificar la última capa de clasificación para ajustarse al número de clases
+    model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=(1, 1), stride=(1, 1))
+
+    # Inicializar pesos de la nueva capa
+    nn.init.xavier_normal_(model.classifier[4].weight)
+    if model.classifier[4].bias is not None:
+        nn.init.zeros_(model.classifier[4].bias)
+
     return model
+
+
+if __name__ == "__main__":
+    # Configuración de prueba
+    num_classes = 2
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    # Crear el modelo
+    model = create_deeplab_model(num_classes=num_classes)
+    model = model.to(device)
+
+    # Resumen del modelo (mostrar número de parámetros)
+    print("Modelo DeepLabV3 configurado para PyTorch:")
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total de parámetros entrenables: {total_params}")
